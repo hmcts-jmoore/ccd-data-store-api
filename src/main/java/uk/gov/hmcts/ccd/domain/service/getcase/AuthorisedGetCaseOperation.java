@@ -1,16 +1,24 @@
 package uk.gov.hmcts.ccd.domain.service.getcase;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.Sets;
+import static uk.gov.hmcts.ccd.domain.service.common.AccessControlService.CAN_READ;
+
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.collect.Sets;
+
 import uk.gov.hmcts.ccd.data.caseaccess.CachedCaseUserRepository;
 import uk.gov.hmcts.ccd.data.caseaccess.CaseUserRepository;
 import uk.gov.hmcts.ccd.data.definition.CachedCaseDefinitionRepository;
@@ -20,8 +28,6 @@ import uk.gov.hmcts.ccd.data.user.UserRepository;
 import uk.gov.hmcts.ccd.domain.model.definition.CaseDetails;
 import uk.gov.hmcts.ccd.domain.model.definition.CaseType;
 import uk.gov.hmcts.ccd.domain.service.common.AccessControlService;
-
-import static uk.gov.hmcts.ccd.domain.service.common.AccessControlService.CAN_READ;
 
 @Service
 @Qualifier("authorised")
@@ -57,12 +63,111 @@ public class AuthorisedGetCaseOperation implements GetCaseOperation {
 
     @Override
     public Optional<CaseDetails> execute(String caseReference) {
+    	Optional<CaseDetails> target = getCaseDetails(caseReference);
+    	target = mergeCaseDetails(target, getCaseToInclude(target), "parties");
+    	target = lookupRefs(target);
+    	return target;
+    }
+
+	private Optional<CaseDetails> getCaseDetails(String caseReference)
+	{
         return getCaseOperation.execute(caseReference)
             .flatMap(caseDetails ->
                 verifyReadAccess(getCaseType(caseDetails.getCaseTypeId()),
                     getUserRoles(caseDetails.getId()),
                     caseDetails));
-    }
+	}
+
+	private String getNodeString(JsonNode node, String key)
+	{
+		if (node == null)
+		{
+			return null;
+		}
+		Object value = node.get(key);
+		if (value == null)
+		{
+			return null;
+		}
+		return value.toString().replace("\"", "");
+	}
+
+	private Optional<CaseDetails> lookupRefs(Optional<CaseDetails> target)
+	{
+		if (target.isPresent())
+		{
+			Map<String, JsonNode> data = target.get().getData();
+			ArrayNode parties = (ArrayNode)data.get("parties");
+			ArrayNode partyRefs = (ArrayNode)data.get("partyRefs");
+			if (parties != null && partyRefs != null)
+			{
+				Map<String, String> partyNames = new HashMap<>();
+				parties.forEach(p -> partyNames.put(getNodeString(p.get("value"), "id"), getNodeString(p.get("value"), "name")));
+				for (JsonNode partyRef : partyRefs)
+				{
+					((ObjectNode)partyRef.get("value")).put("name", partyNames.get(getNodeString(partyRef.get("value"),"id")));
+				}
+			}
+		}
+		return target;
+	}
+
+	/*
+	 * Get the details of the case to include, if any.
+	 */
+	private Optional<CaseDetails> getCaseToInclude(Optional<CaseDetails> target)
+	{
+		if (!target.isPresent())
+		{
+			return Optional.empty();
+		}
+		else
+		{
+			String caseToIncludeReference = getCaseToIncludeReference(target.get());
+			if (caseToIncludeReference == null)
+			{
+				return Optional.empty();
+			}
+			return getCaseDetails(caseToIncludeReference);
+		}
+	}
+
+	/*
+	 * Extract the details of the case to include, if any.
+	 */
+	private String getCaseToIncludeReference(CaseDetails target)
+	{
+		System.out.println("************************************************************************");
+		System.out.println("************************************************************************");
+		System.out.println(target.getData());
+		System.out.println("************************************************************************");
+		System.out.println("************************************************************************");
+		Object parentCase = target.getData().get("parentCase");
+		return parentCase != null ? parentCase.toString().replace("\"", "") : null;
+	}
+
+	/*
+	 * Merge the case data from the source into the target, overwriting any existing matching entries.
+	 * Also merge the security classifications.
+	 */
+	private Optional<CaseDetails> mergeCaseDetails(Optional<CaseDetails> target, Optional<CaseDetails> source, String ... fields)
+	{
+		if (!source.isPresent())
+		{
+			return target;
+		}
+		if (!target.isPresent())
+		{
+			return source;
+		}
+		for (String field : fields)
+		{
+			target.get().getData().put(field, source.get().getData().get(field));
+			target.get().getDataClassification().put(field, source.get().getDataClassification().get(field));
+		}
+		return target;
+	}
+	
 
     private CaseType getCaseType(String caseTypeId) {
         return caseDefinitionRepository.getCaseType(caseTypeId);
